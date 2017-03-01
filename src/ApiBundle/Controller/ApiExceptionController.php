@@ -49,7 +49,7 @@ class ApiExceptionController extends Controller
         $currentContent = $this->getAndCleanOutputBuffering($request->headers->get('X-Php-Ob-Level', -1));
         $code = $this->getStatusCode($exception);
 
-        $errMessageArray = split('#showme#', $exception->getMessage());
+        $errMessageArray = explode('#showme#', $exception->getMessage());
         $errorMessage = $errMessageArray[0];
         $showMessage = count($errMessageArray) > 1 ? $errMessageArray[1] : '';
 
