@@ -26,10 +26,15 @@ use Symfony\Component\HttpFoundation\File\UploadedFile;
 use FOS\UserBundle\Model\UserInterface;
 use Symfony\Component\Validator\Constraints as Assert;
 
+use Sensio\Bundle\FrameworkExtraBundle\Configuration\Security;
+use Symfony\Component\Form\Extension\Core\Type\SubmitType;
+use Symfony\Component\Form\Extension\Core\Type\CollectionType;
+use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
+
 /**
  * Controller used to manage user contents in the backend.
  *
- * @Route("/user")
+ * This UserController is common to both admin and a normal user.
  *
  * @author Amarendra Kumar Sinha <aksinha@nerdapplabs.com>
  */
@@ -38,29 +43,67 @@ class UserController extends Controller
     /**
      * Lists all User entities.
      *
-     * @Route("/", name="user_index")
+     * @Route("/admin/user", name="user_index")
+     * @Route("/user", name="admin_user_index")
      * @Method("GET")
      */
     public function indexAction()
     {
-      return $this->redirectToRoute('homepage');
+        // First, check if admin
+        if ($this->get('security.authorization_checker')->isGranted('ROLE_ADMIN')) {
+            $repository = $this->getDoctrine()->getRepository('ApiBundle:User');
+            $query = $repository->createQueryBuilder('p')
+                                  ->where('p.enabled = TRUE')
+                                  ->getQuery();
+            $users = $query->getResult();
+
+            return $this->render('@ApiBundle/Resources/views/admin/user/index.html.twig', ['users' => $users]);
+        }
+
+        // Not an Admin, so check if normal user
+        if ($this->get('security.authorization_checker')->isGranted('IS_AUTHENTICATED_FULLY')) {
+            return $this->redirectToRoute('homepage');
+        }
+
+        // None of the above two cases, so throw exception
+        throw $this->createAccessDeniedException();
     }
 
     /**
      * Creates a new User entity.
      *
-     * @Route("/new", name="user_new")
+     * @Route("/admin/usernew", name="admin_user_new")
+     * @Route("/user/new", name="user_new")
      * @Method({"GET", "POST"})
      */
     public function newAction(Request $request)
     {
         $confirmationEnabled = $this->container->getParameter('registration_requires_email_confirmation');
         $userManager = $this->container->get('fos_user.user_manager');
-
         $user = $userManager->createUser();
-        $user->setRoles(['ROLE_USER']);
+
+        // If reached this page as normal user
+        if (!$this->get('security.authorization_checker')->isGranted('ROLE_ADMIN')) {
+            $user->setRoles(['ROLE_USER']);
+        }
 
         $form = $this->createForm(UserType::class, $user);
+
+        // If reached this page as admin
+        if ($this->get('security.authorization_checker')->isGranted('ROLE_ADMIN')) {
+            // Role added in admin area
+            $form->add('roles', CollectionType::class, array(
+                              'entry_type'   => ChoiceType::class,
+                              'entry_options'  => array(
+                                  'label' => false,
+                                  'choices'  => array(
+                                      'ROLE_ADMIN' => 'ROLE_ADMIN',
+                                      'ROLE_USER' => 'ROLE_USER',
+                                      'ROLE_API'  => 'ROLE_API',
+                                      ),
+                              ),
+            ));
+        }
 
         $locale = $request->getLocale();
 
@@ -75,11 +118,19 @@ class UserController extends Controller
             if ( null != $file ) {
                 // First validate uploaded image. If errors found, return to same page with flash errors
                 $imageErrors = $this->validateImage($file, $locale);
+
                 if (!$imageErrors) {
+                  if ($this->get('security.authorization_checker')->isGranted('ROLE_ADMIN')) {
+                      return $this->render('@ApiBundle/Resources/views/admin/user/new.html.twig', [
+                          'form' => $form->createView(),
+                          'attr' =>  array('enctype' => 'multipart/form-data'),
+                      ]);
+                  } else {
                     return $this->render('@ApiBundle/Resources/views/user/new.html.twig', [
                         'form' => $form->createView(),
                         'attr' =>  array('enctype' => 'multipart/form-data'),
                     ]);
+                  }
                 }
 
                 // Generate a unique name for the file before saving it
@@ -97,30 +148,215 @@ class UserController extends Controller
 
             $userManager->updateUser($user);
 
-            $authUser = false;
-            if ($confirmationEnabled) {
-                $this->container->get('session')->set('fos_user_send_confirmation_email/email', $user->getEmail());
-                $route = 'fos_user_registration_check_email';
+            if ($this->get('security.authorization_checker')->isGranted('ROLE_ADMIN')) {
+                $this->logMessageAndFlash(200, 'success', 'User successfully created: ', $this->get('translator')->trans('flash.user_created_successfully'), $request->getLocale() );
+                return $this->redirectToRoute('admin_user_index');
             } else {
-                $authUser = true;
-                $route = 'fos_user_registration_confirmed';
-            }
+                // Normal user should get logged in
+                $authUser = false;
+                if ($confirmationEnabled) {
+                    $this->container->get('session')->set('fos_user_send_confirmation_email/email', $user->getEmail());
+                    $route = 'fos_user_registration_check_email';
+                } else {
+                    $authUser = true;
+                    $route = 'fos_user_registration_confirmed';
+                }
 
-            $this->logMessageAndFlash(200, 'success', 'User successfully created: ', $this->get('translator')->trans('flash.user_created_successfully'), $request->getLocale() );
-            $url = $this->container->get('router')->generate($route);
-            $response = new RedirectResponse($url);
+                $this->logMessageAndFlash(200, 'success', 'User successfully created: ', $this->get('translator')->trans('flash.user_created_successfully'), $request->getLocale() );
+                $url = $this->container->get('router')->generate($route);
+                $response = new RedirectResponse($url);
 
-            if ($authUser) {
-                $this->authenticateUser($user, $response);
-            }
+                if ($authUser) {
+                    $this->authenticateUser($user, $response);
+                }
 
-            return $response;
+                return $response;
+          }
+        }
+
+        if ($this->get('security.authorization_checker')->isGranted('ROLE_ADMIN')) {
+            return $this->render('@ApiBundle/Resources/views/admin/user/new.html.twig', [
+                'form' => $form->createView(),
+                'attr' =>  array('enctype' => 'multipart/form-data'),
+            ]);
         }
 
         return $this->render('@ApiBundle/Resources/views/user/new.html.twig', [
             'form' => $form->createView(),
             'attr' =>  array('enctype' => 'multipart/form-data'),
         ]);
+    }
+
+    /**
+     * Finds and displays a User entity.
+     *
+     * @Route("/admin/user/{id}", name="admin_user_show", requirements={"id": "\d+"})
+     * @Route("/user/profile-show/{id}", name="user_profile_show")
+     * @Method("GET")
+     */
+    public function showAction(User $user)
+    {
+      // If Admin
+      if ($this->get('security.authorization_checker')->isGranted('ROLE_ADMIN')) {
+          $deleteForm = $this->createDeleteForm($user);
+
+          return $this->render('@ApiBundle/Resources/views/admin/user/show.html.twig', [
+              'user' => $user,
+              'delete_form' => $deleteForm->createView(),
+          ]);
+      }
+
+      // Not an Admin, so check if normal user
+      if ($this->get('security.authorization_checker')->isGranted('IS_AUTHENTICATED_FULLY')) {
+          return $this->render('@ApiBundle/Resources/views/user/show.html.twig', [
+              'user' => $user
+          ]);
+      }
+
+      // None of the above two cases, so throw exception
+      throw $this->createAccessDeniedException();
+    }
+
+    /**
+     * Displays a form to edit an existing User entity.
+     *
+     * @Route("/admin/user/edit/{id}", requirements={"id": "\d+"}, name="admin_user_edit")
+     * @Route("/user/profile-edit/{id}", name="user_profile_edit")
+     * @Method({"GET", "POST"})
+     */
+    public function editAction(User $user, Request $request)
+    {
+        $entityManager = $this->getDoctrine()->getManager();
+
+        $currentFilename = $user->getImage();
+        if ($user->getImage()) {
+          $user->setImage(
+              new File($this->getParameter('images_profile_path').'/'.$currentFilename)
+          );
+        }
+
+        $editForm = $this->createForm(UserProfileType::class, $user);
+        $deleteForm = $this->createDeleteForm($user);
+        $locale = $request->getLocale();
+
+        // If Admin
+        if ($this->get('security.authorization_checker')->isGranted('ROLE_ADMIN')) {
+          // Role added in admin area
+          $editForm->add('roles', CollectionType::class, array(
+                            'entry_type'   => ChoiceType::class,
+                            'entry_options'  => array(
+                                'label' => false,
+                                'choices'  => array(
+                                    'ROLE_ADMIN' => 'ROLE_ADMIN',
+                                    'ROLE_USER' => 'ROLE_USER',
+                                    'ROLE_API'  => 'ROLE_API',
+                                    ),
+                            ),
+          ));
+        }
+        $editForm->handleRequest($request);
+
+        if ($editForm->isSubmitted() && $editForm->isValid()) {
+            // $file stores the uploaded Image file
+            /** @var Symfony\Component\HttpFoundation\File\UploadedFile $file */
+            $file = $user->getImage();
+
+            // If a file has been uploaded
+            if ( null != $file ) {
+                // First validate uploaded image. If errors found, return to same page with flash errors
+                $imageErrors = $this->validateImage($file, $locale);
+                if (!$imageErrors) {
+                  // If Admin
+                  if ($this->get('security.authorization_checker')->isGranted('ROLE_ADMIN')) {
+                      return $this->render('@ApiBundle/Resources/views/admin/user/edit.html.twig', [
+                          'user' => $user,
+                          'current_image' => $currentFilename,
+                          'edit_form' => $editForm->createView(),
+                          'delete_form' => $deleteForm->createView(),
+                          'attr' =>  array('enctype' => 'multipart/form-data'),
+                      ]);
+                  } else {
+                      return $this->render('@ApiBundle/Resources/views/user/edit.html.twig', [
+                          'user' => $user,
+                          'current_image' => $currentFilename,
+                          'edit_form' => $editForm->createView(),
+                          'attr' =>  array('enctype' => 'multipart/form-data'),
+                      ]);
+                  }
+                }
+
+                // Generate a unique name for the file before saving it
+                $fileName = md5(uniqid()).'.'.$file->guessExtension();
+
+                // Move the file to the directory where images are stored
+                $file->move($this->getParameter('images_profile_path'), $fileName );
+
+                // Update the 'image' property to store the Image file name
+                // instead of its contents
+                $user->setImage($fileName);
+            } else {
+                $user->setImage($currentFilename);
+            }
+
+            $this->setUserProfileData($user, $editForm);
+
+            $entityManager = $this->getDoctrine()->getManager();
+            $entityManager->flush();
+
+            $this->logMessageAndFlash(200, 'success', 'User successfully updated: ', $this->get('translator')->trans('flash.user_updated_successfully'), $request->getLocale() );
+
+            // If Admin
+            if ($this->get('security.authorization_checker')->isGranted('ROLE_ADMIN')) {
+                return $this->redirectToRoute('admin_user_index');
+            } else {
+              $route = 'user_profile_show';
+              $url = $this->container->get('router')->generate($route, array('id' => $user->getId()));
+              $response = new RedirectResponse($url);
+              return $response;
+            }
+        }
+
+        if ($this->get('security.authorization_checker')->isGranted('ROLE_ADMIN')) {
+            return $this->render('@ApiBundle/Resources/views/admin/user/edit.html.twig', [
+                'user' => $user,
+                'current_image' => $currentFilename,
+                'edit_form' => $editForm->createView(),
+                'delete_form' => $deleteForm->createView(),
+                'attr' =>  array('enctype' => 'multipart/form-data'),
+            ]);
+        } else {
+            return $this->render('@ApiBundle/Resources/views/user/edit.html.twig', [
+                'user' => $user,
+                'current_image' => $currentFilename,
+                'edit_form' => $editForm->createView(),
+                'attr' =>  array('enctype' => 'multipart/form-data'),
+            ]);
+        }
+    }
+
+    /**
+     * Deletes a User entity.
+     *
+     * @Route("/admin/user/delete/{id}", name="admin_user_delete")
+     */
+    public function deleteAction(Request $request, User $user)
+    {
+        // Only Admin can access this page
+        $this->denyAccessUnlessGranted('ROLE_ADMIN', null, 'Unable to access this page!');
+
+        $adminUser = $this->container->get('security.context')->getToken()->getUser();
+
+        if ($adminUser->getId() == $user->getId() ) {
+            // Admin is not allowed to delete his own account
+            $this->logMessageAndFlash(200, 'danger', 'Admin is not allowed to delete his own account', $this->get('translator')->trans('flash.admin_deleted_denied1'), $request->getLocale() );
+        } else {
+            $entityManager = $this->getDoctrine()->getManager();
+            $user->setEnabled(false);
+            // $user->setUpdatedAt(new \DateTime());
+            $entityManager->flush();
+            $this->logMessageAndFlash(200, 'success', 'User successfully deleted: ', $this->get('translator')->trans('flash.user_deleted_successfully'), $request->getLocale() );
+        }
+        return $this->redirectToRoute('admin_user_index');
     }
 
     /**
@@ -144,92 +380,19 @@ class UserController extends Controller
     }
 
     /**
-     * Finds and displays a User entity.
+     * Creates a form to delete a User entity by id.
      *
-     * @Route("/profile-show/{id}", name="user_profile_show")
-     * @Method("GET")
-     */
-    public function showAction(User $user)
-    {
-        return $this->render('@ApiBundle/Resources/views/user/show.html.twig', [
-            'user' => $user
-        ]);
-    }
-
-    /**
-     * Displays a form to edit an existing User entity.
+     * @param User $user The user object
      *
-     * @Route("/profile-edit/{id}", name="user_profile_edit")
-     * @Method({"GET", "POST"})
+     * @return \Symfony\Component\Form\Form The form
      */
-    public function editAction(User $user, Request $request)
+    private function createDeleteForm(User $user)
     {
-        $entityManager = $this->getDoctrine()->getManager();
-
-        $currentFilename = $user->getImage();
-        if ($user->getImage()) {
-          $user->setImage(
-              new File($this->getParameter('images_profile_path').'/'.$currentFilename)
-          );
-        }
-
-        $editForm = $this->createForm(UserProfileType::class, $user);
-
-        $locale = $request->getLocale();
-
-        $editForm->handleRequest($request);
-
-        if ($editForm->isSubmitted() && $editForm->isValid()) {
-            // $file stores the uploaded Image file
-            /** @var Symfony\Component\HttpFoundation\File\UploadedFile $file */
-            $file = $user->getImage();
-
-            // If a file has been uploaded
-            if ( null != $file ) {
-                // First validate uploaded image. If errors found, return to same page with flash errors
-                $imageErrors = $this->validateImage($file, $locale);
-                if (!$imageErrors) {
-                    return $this->render('@ApiBundle/Resources/views/user/edit.html.twig', [
-                        'user' => $user,
-                        'current_image' => $currentFilename,
-                        'edit_form' => $editForm->createView(),
-                        'attr' =>  array('enctype' => 'multipart/form-data'),
-                    ]);
-                }
-
-                // Generate a unique name for the file before saving it
-                $fileName = md5(uniqid()).'.'.$file->guessExtension();
-
-                // Move the file to the directory where images are stored
-                $file->move($this->getParameter('images_profile_path'), $fileName );
-
-                // Update the 'image' property to store the Image file name
-                // instead of its contents
-                $user->setImage($fileName);
-            } else {
-                $user->setImage($currentFilename);
-            }
-
-            $this->setUserProfileData($user, $editForm);
-
-            $entityManager = $this->getDoctrine()->getManager();
-            $entityManager->flush();
-
-            $this->logMessageAndFlash(200, 'success', 'User successfully updated: ', $this->get('translator')->trans('flash.user_updated_successfully'), $request->getLocale() );
-
-            $route = 'user_profile_show';
-            $url = $this->container->get('router')->generate($route, array('id' => $user->getId()));
-            $response = new RedirectResponse($url);
-
-            return $response;
-        }
-
-        return $this->render('@ApiBundle/Resources/views/user/edit.html.twig', [
-            'user' => $user,
-            'current_image' => $currentFilename,
-            'edit_form' => $editForm->createView(),
-            'attr' =>  array('enctype' => 'multipart/form-data'),
-        ]);
+        return $this->createFormBuilder()
+            ->setAction($this->generateUrl('admin_user_delete', ['id' => $user->getId()]))
+            ->setMethod('DELETE')
+            ->getForm()
+        ;
     }
 
     private function setUserData(User $user, \Symfony\Component\Form\Form $form)
@@ -256,8 +419,13 @@ class UserController extends Controller
       $user->setFirstname($form['firstname']->getData());
       $user->setLastname($form['lastname']->getData());
       $user->setDob($form['dob']->getData());
-      $user->setConfirmationToken(null);
-      $user->setEnabled(true);
+      $user->setEmail($form['email']->getData());
+      $user->setUsername($form['username']->getData());
+
+      // If Roles exist in form as the form is common for both admin and user areas
+      // Only admin area is allowed to have roles
+      $roles = array_key_exists('roles', $form) ? $form['roles']->getData() : $user->getRoles();
+      $user->setRoles($roles);
     }
 
     private function validateImage(UploadedFile $file, $locale)
